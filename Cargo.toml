@@ -2,6 +2,9 @@
 name = "dominote"
 version = "0.1.0"
 edition = "2021"
+description = "A fast, local Markdown note app for macOS"
+license = "MIT"
+repository = "https://github.com/dominik-hurcik/dominote-mac"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

@@ -430,6 +430,16 @@ editor.addEventListener('keydown', e => {
   const type = block.dataset.type;
   const mod = e.metaKey || e.ctrlKey;
 
+  // Cmd+A: first selects the block's text, a second press selects every block.
+  if (mod && !e.shiftKey && e.key === 'a') {
+    const field = e.target.closest('.content, .cell');
+    const sel = getSelection();
+    if (field && (!field.textContent || sel.toString().length >= field.textContent.length)) {
+      e.preventDefault();
+      selectBlocks(editor.firstElementChild, editor.lastElementChild);
+    }
+    return;
+  }
   if (mod && e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
     e.preventDefault();
     return moveBlock(block, e.key === 'ArrowUp');
@@ -584,25 +594,168 @@ editor.addEventListener('mousedown', e => {
   tableOp(block, btn.dataset.op, cell || null);
 });
 
-editor.addEventListener('paste', e => {
-  const block = e.target.closest('.block');
-  if (!block) return;
-  e.preventDefault();
-  const text = e.clipboardData.getData('text/plain');
-  if (!text) return;
-  const plain = block.dataset.type === 'code' || e.target.classList.contains('lang');
-  if (plain || !text.includes('\n') || e.target.closest('.cell')) {
-    document.execCommand('insertText', false, plain ? text : text.replace(/\s*\n\s*/g, ' '));
-    return;
+// ---------- block selection ----------
+// Each block is its own editable field, so native text selection cannot cross blocks.
+// Dragging out of the starting block switches to selecting whole blocks instead.
+let dragAnchor = null, selBlocks = [];
+function clearBlockSel() {
+  selBlocks.forEach(b => b.classList.remove('selected'));
+  selBlocks = [];
+}
+function selectBlocks(a, b) {
+  clearBlockSel();
+  const all = [...editor.children];
+  let i = all.indexOf(a), j = all.indexOf(b);
+  if (i < 0 || j < 0) return;
+  if (i > j) [i, j] = [j, i];
+  selBlocks = all.slice(i, j + 1);
+  selBlocks.forEach(x => x.classList.add('selected'));
+  getSelection().removeAllRanges();
+  document.activeElement?.blur();
+}
+function blockAtY(y) {
+  for (const b of editor.children) if (y < b.getBoundingClientRect().bottom) return b;
+  return editor.lastElementChild;
+}
+function deleteSelectedBlocks() {
+  const next = selBlocks[selBlocks.length - 1].nextElementSibling || selBlocks[0].previousElementSibling;
+  selBlocks.forEach(b => b.remove());
+  selBlocks = [];
+  if (!editor.children.length) editor.append(makeBlock({ type: 'p' }));
+  focusBlock(next && next.isConnected ? next : editor.firstElementChild, 0);
+  renumber();
+  changed();
+}
+function copySelectedBlocks() {
+  const md = MD.serialize(selBlocks.map(readBlock));
+  return navigator.clipboard.writeText(md).then(() => toast(`Copied ${selBlocks.length} block${selBlocks.length > 1 ? 's' : ''}`));
+}
+editor.addEventListener('mousedown', e => {
+  if (e.button !== 0) return;
+  clearBlockSel();
+  dragAnchor = e.target.closest('.table-ctl, .code-bar') ? null : e.target.closest('.block');
+});
+document.addEventListener('mousemove', e => {
+  if (!dragAnchor || !(e.buttons & 1)) return;
+  const b = blockAtY(e.clientY);
+  if (b === dragAnchor && !selBlocks.length) return;
+  selectBlocks(dragAnchor, b);
+  // Scroll while dragging near the top or bottom edge.
+  const main = $('#main'), r = main.getBoundingClientRect();
+  if (e.clientY < r.top + 40) main.scrollTop -= 14;
+  else if (e.clientY > r.bottom - 40) main.scrollTop += 14;
+});
+document.addEventListener('mouseup', () => { dragAnchor = null; });
+document.addEventListener('mousedown', e => { if (!editor.contains(e.target)) clearBlockSel(); });
+document.addEventListener('keydown', e => {
+  if (!selBlocks.length) return;
+  const mod = e.metaKey || e.ctrlKey, k = e.key.toLowerCase();
+  if (e.key === 'Backspace' || e.key === 'Delete') { e.preventDefault(); deleteSelectedBlocks(); }
+  else if (mod && k === 'c') { e.preventDefault(); copySelectedBlocks(); }
+  else if (mod && k === 'x') { e.preventDefault(); copySelectedBlocks().then(deleteSelectedBlocks); }
+  else if (e.key === 'Escape') clearBlockSel();
+  else if (!mod && e.key.length === 1) clearBlockSel();
+}, true);
+
+// Rich paste (from Claude, browsers, Notion, Google Docs): convert HTML structure into blocks.
+const INLINE_TAGS = new Set(['B', 'STRONG', 'I', 'EM', 'CODE', 'A', 'SPAN', 'S', 'DEL', 'STRIKE', 'U', 'BR', 'MARK', 'SUB', 'SUP', 'SMALL', 'LABEL', 'FONT']);
+const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'META', 'LINK', 'TITLE', 'BUTTON', 'svg', 'SVG', 'IMG', 'TEMPLATE', 'NOSCRIPT']);
+function htmlToBlocks(html) {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const out = [];
+  const inline = el => htmlToMd(el).replace(/\s+/g, ' ').trim();
+  function list(el, indent) {
+    for (const li of el.children) {
+      if (li.nodeName !== 'LI') continue;
+      const c = li.cloneNode(true);
+      c.querySelectorAll('ul, ol').forEach(n => n.remove());
+      const cb = c.querySelector('input[type="checkbox"]');
+      cb?.remove();
+      const text = inline(c);
+      if (cb) out.push({ type: 'todo', checked: cb.hasAttribute('checked'), text, indent });
+      else out.push({ type: el.nodeName === 'OL' ? 'ol' : 'ul', text, indent });
+      for (const sub of li.querySelectorAll(':scope > ul, :scope > ol')) list(sub, Math.min(6, indent + 1));
+    }
   }
-  // Multi-line paste: treat it as Markdown and turn it into blocks.
-  const els = MD.parse(text).map(makeBlock);
+  function walk(parent) {
+    let buf = [];
+    const flush = () => {
+      if (!buf.length) return;
+      const d = document.createElement('div');
+      buf.forEach(n => d.append(n.cloneNode(true)));
+      const t = inline(d);
+      if (t) out.push({ type: 'p', text: t });
+      buf = [];
+    };
+    for (const n of parent.childNodes) {
+      const tag = n.nodeName;
+      if (n.nodeType === 3 || INLINE_TAGS.has(tag)) { buf.push(n); continue; }
+      if (n.nodeType !== 1 || SKIP_TAGS.has(tag)) continue;
+      flush();
+      if (/^H[1-6]$/.test(tag)) {
+        const t = inline(n).replace(/^\*\*(.*)\*\*$/, '$1');
+        if (t) out.push({ type: 'h' + Math.min(3, +tag[1]), text: t });
+      } else if (tag === 'P') {
+        const t = inline(n);
+        if (t) out.push({ type: 'p', text: t });
+      } else if (tag === 'UL' || tag === 'OL') list(n, 0);
+      else if (tag === 'PRE') {
+        const lang = (n.querySelector('code')?.className.match(/language-([\w+#-]+)/) || [])[1] || '';
+        out.push({ type: 'code', lang, text: n.textContent.replace(/\n$/, '') });
+      } else if (tag === 'BLOCKQUOTE') {
+        const t = inline(n);
+        if (t) out.push({ type: 'quote', text: t });
+      } else if (tag === 'TABLE') {
+        const rows = [...n.rows].map(tr => [...tr.cells].map(c => inline(c)));
+        if (!rows.length) continue;
+        const w = Math.max(...rows.map(r => r.length));
+        rows.forEach(r => { while (r.length < w) r.push(''); });
+        out.push({ type: 'table', rows });
+      } else if (tag === 'HR') out.push({ type: 'divider' });
+      else walk(n);
+    }
+    flush();
+  }
+  walk(doc.body);
+  return out;
+}
+
+function insertBlocks(block, blocks) {
+  const els = blocks.map(makeBlock);
   if (!els.length) return;
   if (TEXT.has(block.dataset.type) && !content(block).textContent.trim()) block.replaceWith(...els);
   else block.after(...els);
   focusBlock(els[els.length - 1], 'end');
   renumber();
   changed();
+}
+
+editor.addEventListener('paste', e => {
+  const block = e.target.closest('.block');
+  if (!block) return;
+  e.preventDefault();
+  const text = e.clipboardData.getData('text/plain');
+  const html = e.clipboardData.getData('text/html');
+  const plain = block.dataset.type === 'code' || e.target.classList.contains('lang');
+  const cell = e.target.closest('.cell');
+  if (html && !plain) {
+    const blocks = htmlToBlocks(html);
+    const single = blocks.length === 1 && blocks[0].type === 'p';
+    // One paragraph (or any paste into a table cell) goes inline, keeping bold, links and code.
+    if (single || (cell && blocks.length)) {
+      const t = cell ? blocks.map(b => b.text || (b.rows || []).flat().join(' ')).join(' ') : blocks[0].text;
+      document.execCommand('insertHTML', false, MD.inlineToHtml(t));
+      return;
+    }
+    if (blocks.length) return insertBlocks(block, blocks);
+  }
+  if (!text) return;
+  if (plain || !text.includes('\n') || cell) {
+    document.execCommand('insertText', false, plain ? text : text.replace(/\s*\n\s*/g, ' '));
+    return;
+  }
+  // Multi-line plain text: treat it as Markdown.
+  insertBlocks(block, MD.parse(text));
 });
 
 // Click on the empty area below the blocks: continue writing at the end.
@@ -858,10 +1011,13 @@ treeEl.addEventListener('dragstart', e => {
   e.dataTransfer.effectAllowed = 'move';
   e.dataTransfer.setData('text/plain', dragPath);
 });
+// Dropping on a folder moves into it; on a page, into that page's folder; on empty space, to the top level.
 function dropTarget(e) {
   const row = e.target.closest('.item');
-  if (row) return row.dataset.dir ? row : null;
-  return treeEl;
+  if (!row) return treeEl;
+  if (row.dataset.dir) return row;
+  const parent = dirOf(row.dataset.path);
+  return parent ? treeEl.querySelector(`.item[data-path="${CSS.escape(parent)}"]`) || treeEl : treeEl;
 }
 treeEl.addEventListener('dragover', e => {
   if (!dragPath) return;
@@ -1001,7 +1157,7 @@ const FONTS = {
   'Menlo': 'Menlo, monospace',
   'Courier New': '"Courier New", Courier, monospace',
 };
-const DEFAULTS = { theme: 'system', uiFont: 'System', pageFont: 'System', codeFont: 'SF Mono', pageSize: '16' };
+const DEFAULTS = { theme: 'light', uiFont: 'New York', pageFont: 'New York', codeFont: 'SF Mono', pageSize: '16' };
 const settings = { ...DEFAULTS, ...store.get('settings', {}) };
 const fontStack = name => FONTS[name] || `"${name.replace(/"/g, '')}", ${FONTS.System}`;
 

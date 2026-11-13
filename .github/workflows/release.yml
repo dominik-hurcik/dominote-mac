@@ -1,0 +1,46 @@
+# Builds a universal (Apple Silicon + Intel) app and publishes it when a version tag is pushed.
+# Release: git tag v0.1.0 && git push origin v0.1.0
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Test
+        run: |
+          node tests/md.test.js
+          cargo test
+
+      - name: Build
+        env:
+          CI: true
+        run: npx -y @tauri-apps/cli@2 build --target universal-apple-darwin
+
+      - name: Package
+        working-directory: target/universal-apple-darwin/release/bundle
+        run: |
+          ditto -c -k --keepParent macos/Dominote.app Dominote.app.zip
+          cp dmg/*.dmg Dominote.dmg
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: target/universal-apple-darwin/release/bundle
+        run: gh release create "$GITHUB_REF_NAME" --title "Dominote $GITHUB_REF_NAME" --generate-notes Dominote.app.zip Dominote.dmg
