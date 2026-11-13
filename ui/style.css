@@ -266,3 +266,24 @@ td:focus, th:focus { box-shadow: inset 0 0 0 2px rgba(35, 131, 226, 0.5); }
 /* Whole-block selection (drag across blocks, or Cmd+A twice) */
 .block.selected { background: rgba(35, 131, 226, 0.16); border-radius: 4px; }
 .block.selected[data-type="code"], .block.selected[data-type="callout"] { box-shadow: 0 0 0 2px rgba(35, 131, 226, 0.45); }
+
+/* Export as PDF goes through the print dialog: only the page, always in light colors. */
+@media print {
+  :root, :root:not([data-theme="light"]), :root[data-theme="dark"] {
+    --bg: #ffffff; --side: #f7f7f5; --text: #37352f; --muted: #787774; --faint: #a5a29b; --border: #e3e2df;
+    --code-bg: #f6f5f4; --callout-bg: #f1f1ef; color-scheme: light;
+    --hl-keyword: #cf222e; --hl-string: #0a3069; --hl-comment: #6e7781; --hl-number: #0550ae;
+    --hl-title: #8250df; --hl-type: #953800; --hl-tag: #116329; --hl-attr: #0550ae; --hl-meta: #6e7781;
+  }
+  html, body, #main { height: auto; overflow: visible; display: block; }
+  #sidebar, .drag, .top-drag, #crumbs, #empty, #sketch, .code-bar, .table-ctl, .popup, #toast { display: none !important; }
+  #page { max-width: none; padding: 0; } /* page margins come from the print command */
+  #title:empty::before { content: none; }
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; transition: none !important; }
+  .block.done .content { color: var(--muted); }
+  /* Print the highlighted copy only, so the PDF text has each line of code once. */
+  .code-wrap .hl { position: static; }
+  .code-wrap pre.content { display: none; }
+  pre, table, blockquote, img, .code-wrap { break-inside: avoid; }
+  h1, h2, h3 { break-after: avoid; }
+}

@@ -51,10 +51,18 @@ struct Node {
     name: String,
     path: String,
     dir: bool,
+    /// A linked folder: a symlink to a folder elsewhere on disk, shown like any other folder.
+    link: bool,
     children: Vec<Node>,
 }
 
-fn walk(dir: &Path) -> Vec<Node> {
+/// Linked folders can contain links back up the tree, so walks stop at this depth.
+const MAX_DEPTH: usize = 12;
+
+fn walk(dir: &Path, depth: usize) -> Vec<Node> {
+    if depth > MAX_DEPTH {
+        return vec![];
+    }
     let Ok(rd) = fs::read_dir(dir) else { return vec![] };
     let mut out: Vec<Node> = rd
         .flatten()
@@ -64,11 +72,12 @@ fn walk(dir: &Path) -> Vec<Node> {
                 return None;
             }
             let p = e.path();
+            let link = e.file_type().is_ok_and(|t| t.is_symlink());
             if p.is_dir() {
-                Some(Node { name, path: rel(&p), dir: true, children: walk(&p) })
+                Some(Node { name, path: rel(&p), dir: true, link, children: walk(&p, depth + 1) })
             } else {
                 let title = name.strip_suffix(".md").or_else(|| name.strip_suffix(SKETCH))?.to_string();
-                Some(Node { name: title, path: rel(&p), dir: false, children: vec![] })
+                Some(Node { name: title, path: rel(&p), dir: false, link: false, children: vec![] })
             }
         })
         .collect();
@@ -88,7 +97,7 @@ const EMPTY_SKETCH: &str = r#"{"type":"excalidraw","version":2,"source":"dominot
 #[tauri::command]
 fn tree() -> Vec<Node> {
     let _ = fs::create_dir_all(root().join("Sketches"));
-    walk(&root())
+    walk(&root(), 0)
 }
 
 #[tauri::command]
@@ -251,7 +260,46 @@ fn delete(path: String) -> Result<(), String> {
     if path.trim().is_empty() {
         return Err("refusing to delete the notes root".into());
     }
-    trash::delete(resolve(&path)?).map_err(|e| e.to_string())
+    let p = resolve(&path)?;
+    // A linked folder is only unlinked. The real folder and its files stay where they are.
+    if fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_symlink()) {
+        return fs::remove_file(&p).map_err(|e| e.to_string());
+    }
+    trash::delete(p).map_err(|e| e.to_string())
+}
+
+// ---------- linked folders ----------
+// A folder elsewhere on disk shows up in the sidebar through a symlink inside the notes root.
+// Its pages open, save and search like any other, and agents reading the root see it too.
+
+fn link_into(dir: &str, target: &Path) -> Result<String, String> {
+    let target = target.canonicalize().map_err(|e| e.to_string())?;
+    let root = root().canonicalize().map_err(|e| e.to_string())?;
+    if !target.is_dir() {
+        return Err("not a folder".into());
+    }
+    if target.starts_with(&root) || root.starts_with(&target) {
+        return Err("that folder is already part of your notes".into());
+    }
+    let name = target.file_name().map_or("Linked".into(), |n| n.to_string_lossy().to_string());
+    let at = unique(&resolve(dir)?, &name, "");
+    std::os::unix::fs::symlink(&target, &at).map_err(|e| e.to_string())?;
+    Ok(rel(&at))
+}
+
+/// Ask for a folder with the macOS picker, then link it into `dir`. None when the picker is cancelled.
+#[tauri::command]
+async fn link_folder(dir: String) -> Result<Option<String>, String> {
+    let out = std::process::Command::new("osascript")
+        // `activate` brings the picker in front of the Dominote window.
+        .args(["-e", "activate", "-e", r#"POSIX path of (choose folder with prompt "Link a folder into Dominote")"#])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let picked = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    link_into(&dir, Path::new(&picked)).map(Some)
 }
 
 #[derive(Serialize)]
@@ -263,21 +311,24 @@ struct Hit {
 
 #[tauri::command]
 fn search(query: String) -> Vec<Hit> {
-    fn notes(dir: &Path, out: &mut Vec<PathBuf>) {
+    fn notes(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
+        if depth > MAX_DEPTH {
+            return;
+        }
         for e in fs::read_dir(dir).into_iter().flatten().flatten() {
             let p = e.path();
             if e.file_name().to_string_lossy().starts_with('.') {
                 continue;
             }
             if p.is_dir() {
-                notes(&p, out);
+                notes(&p, out, depth + 1);
             } else if p.extension().is_some_and(|x| x == "md" || x == "excalidraw") {
                 out.push(p);
             }
         }
     }
     let mut files = vec![];
-    notes(&root(), &mut files);
+    notes(&root(), &mut files, 0);
     let q = query.to_lowercase();
     let mut title_hits = vec![];
     let mut body_hits = vec![];
@@ -302,11 +353,35 @@ fn search(query: String) -> Vec<Hit> {
     title_hits
 }
 
+/// Export as PDF: open the macOS print dialog, which has a PDF button.
+/// Tauri's own print uses zero page margins, so long pages ran to the top edge of page 2 and on.
+#[tauri::command]
+fn print_page(window: tauri::WebviewWindow, title: String) -> Result<(), String> {
+    window
+        .with_webview(move |wv| unsafe {
+            use objc2_app_kit::NSPrintInfo;
+            use objc2_web_kit::WKWebView;
+            let view = &*(wv.inner() as *const WKWebView);
+            let info = NSPrintInfo::sharedPrintInfo();
+            info.setTopMargin(43.0); // 0.6 inch
+            info.setBottomMargin(43.0);
+            info.setLeftMargin(50.0); // 0.7 inch
+            info.setRightMargin(50.0);
+            let op = view.printOperationWithPrintInfo(&info);
+            op.setJobTitle(Some(&objc2_foundation::NSString::from_str(&title))); // the PDF's default file name
+            op.setCanSpawnSeparateThread(true);
+            if let Some(w) = view.window() {
+                op.runOperationModalForWindow_delegate_didRunSelector_contextInfo(&w, None, None, std::ptr::null_mut());
+            }
+        })
+        .map_err(|e| e.to_string())
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             root_dir, tree, read_note, write_note, create_note, create_folder, rename, move_item, delete, search,
-            history, read_version
+            history, read_version, link_folder, print_page
         ])
         .run(tauri::generate_context!())
         .expect("error while running Dominote");
@@ -339,6 +414,32 @@ mod tests {
         assert_eq!(t[0].name, "Sketches");
         assert_eq!(t[0].children[0].name, "Plan");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn linked_folder_shows_and_unlinks_without_touching_files() {
+        let _lock = ROOT.lock().unwrap();
+        let base = std::env::temp_dir().join(format!("dominote-link-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (dir, ext) = (base.join("notes"), base.join("Context"));
+        fs::create_dir_all(ext.join("deep")).unwrap();
+        fs::write(ext.join("deep/spec.md"), "hello").unwrap();
+        std::os::unix::fs::symlink(&ext, ext.join("deep/loop")).unwrap();
+        std::env::set_var("DOMINOTE_DIR", &dir);
+        let _ = root();
+        assert!(link_into("", &dir).is_err(), "root can't link itself");
+        assert_eq!(link_into("", &ext).unwrap(), "Context");
+        let t = tree();
+        let c = t.iter().find(|n| n.name == "Context").unwrap();
+        assert!(c.link);
+        assert_eq!(read_note("Context/deep/spec.md".into()).unwrap(), "hello");
+        write_note("Context/deep/spec.md".into(), "edited".into()).unwrap();
+        assert_eq!(fs::read_to_string(ext.join("deep/spec.md")).unwrap(), "edited");
+        assert!(search("edited".into()).iter().any(|h| h.path == "Context/deep/spec.md"));
+        delete("Context".into()).unwrap();
+        assert!(!dir.join("Context").exists());
+        assert!(ext.join("deep/spec.md").exists(), "unlinking keeps the real files");
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

@@ -47,11 +47,13 @@ Most note apps ship a full browser engine, sync servers and a database. Dominote
 - Search across titles and page text with ⌘K.
 - Sketches: a whiteboard for brainstorming and presenting, powered by [Excalidraw](https://github.com/excalidraw/excalidraw). Shapes, arrows, freehand drawing, text and images, saved as `.excalidraw` files you can also open on excalidraw.com.
 - Present mode with ⇧⌘F: full screen without the sidebar, for a page or a sketch.
+- Export a page as PDF with ⇧⌘E, or right-click it and choose **Export as PDF**. The PDF is always in light colors.
 - Drag across blocks to select several, then copy them as Markdown, cut or delete.
 - Light and dark themes, and a choice of fonts for the menus, the page and code.
 - Autosave on every change, written atomically so a crash can't corrupt a note.
 - Undo and redo for every change on a page, including deleted blocks, table edits and changes made by an AI agent.
 - Page history. Right-click a page and choose **Page history** to restore an older version. A copy is kept every 10 minutes while you edit, in `.dominote/history` inside your notes folder.
+- Linked folders. Right-click the sidebar and choose **Link folder from disk** to show a folder from anywhere on your Mac. Its pages open, save and search like your own. Dominote adds a symlink in your notes folder and never moves the files. **Unlink folder** removes only the link.
 
 <table>
   <tr>
@@ -105,6 +107,7 @@ See [Build from source](#build-from-source).
 | New folder | ⇧⌘N |
 | New sketch | ⌥⌘N |
 | Present (full screen) | ⇧⌘F |
+| Export page as PDF | ⇧⌘E |
 | Search | ⌘K |
 | Settings | ⌘, |
 | Toggle sidebar | ⌘\ |

@@ -1041,6 +1041,14 @@ async function closeSketch(save = true) {
   document.body.classList.remove('sketching');
 }
 // Presenting: full screen without the sidebar. Works for notes and sketches.
+// Export as PDF: the macOS print dialog has a PDF button. Print CSS shows only the page.
+async function exportPdf(path = current) {
+  if (!path || isSketch(path)) return toast('Open a page to export it');
+  if (path !== current) await openNote(path);
+  await flush();
+  invoke('print_page', { title: base(path) }).catch(toast);
+}
+
 async function togglePresent() {
   const win = window.__TAURI__.window.getCurrentWindow();
   try {
@@ -1053,6 +1061,7 @@ async function togglePresent() {
 // ---------- tree ----------
 const ICON_PAGE = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M4 1.5h5.5L13 5v9.5H4z"/><path d="M9.5 1.5V5H13"/></svg>';
 const ICON_SKETCH = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 14l1-4 8-8 3 3-8 8z"/><path d="M9.5 3.5l3 3"/></svg>';
+const ICON_LINK = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M1.5 3.5h4.5l1.5 1.5h7v8.5h-13z"/><path d="M6.5 11.5l3.5-3.5M7.5 8h2.5v2.5"/></svg>';
 const ICON_FOLDER = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M1.5 3.5h4.5l1.5 1.5h7v8.5h-13z"/></svg>';
 
 async function refreshTree(force) {
@@ -1089,10 +1098,11 @@ function renderNodes(nodes, parent, depth) {
     row.className = 'item';
     row.dataset.path = n.path;
     row.dataset.dir = n.dir ? '1' : '';
+    if (n.link) { row.dataset.link = '1'; row.title = 'Linked folder'; }
     row.draggable = true;
     row.style.paddingLeft = depth * 14 + 4 + 'px';
     const isOpen = openDirs.has(n.path);
-    row.innerHTML = `<span class="twisty">${n.dir ? (isOpen ? '▼' : '▶') : ''}</span><span class="icon">${n.dir ? ICON_FOLDER : isSketch(n.path) ? ICON_SKETCH : ICON_PAGE}</span><span class="label"></span>`;
+    row.innerHTML = `<span class="twisty">${n.dir ? (isOpen ? '▼' : '▶') : ''}</span><span class="icon">${n.link ? ICON_LINK : n.dir ? ICON_FOLDER : isSketch(n.path) ? ICON_SKETCH : ICON_PAGE}</span><span class="label"></span>`;
     row.querySelector('.label').textContent = n.name;
     parent.append(row);
     if (n.dir && isOpen) {
@@ -1174,6 +1184,28 @@ async function trashItem(path) {
     const open = current || sketchPath;
     if (open && (open === path || open.startsWith(path + '/'))) showEmpty();
     toast('Moved to Trash');
+    refreshTree(true);
+  } catch (err) { toast(err); }
+}
+
+// Linked folders: a folder elsewhere on disk, shown here through a symlink.
+async function linkFolder(dir) {
+  try {
+    const p = await invoke('link_folder', { dir });
+    if (!p) return;
+    if (dir) openDirs.add(dir);
+    openDirs.add(p);
+    store.set('openDirs', [...openDirs]);
+    refreshTree(true);
+  } catch (err) { toast(err); }
+}
+async function unlinkFolder(path) {
+  await flush();
+  try {
+    await enqueue(() => invoke('delete', { path }));
+    const open = current || sketchPath;
+    if (open && open.startsWith(path + '/')) showEmpty();
+    toast('Folder unlinked. Its files are untouched');
     refreshTree(true);
   } catch (err) { toast(err); }
 }
@@ -1263,6 +1295,7 @@ $('#sidebar').addEventListener('contextmenu', e => {
       { label: 'New page', run: () => newNote('') },
       { label: 'New sketch', run: () => newSketch(SKETCHES) },
       { label: 'New folder', run: () => newFolder('') },
+      { label: 'Link folder from disk…', run: () => linkFolder('') },
       '-',
       { label: 'Copy notes folder path', run: () => copyPath('') },
     ]);
@@ -1270,14 +1303,18 @@ $('#sidebar').addEventListener('contextmenu', e => {
   const path = row.dataset.path, sk = inSketches(path);
   const items = row.dataset.dir
     ? [{ label: sk ? 'New sketch inside' : 'New page inside', run: () => { openDirs.add(path); sk ? newSketch(path) : newNote(path); } },
-       { label: 'New folder inside', run: () => newFolder(path) }, '-']
+       { label: 'New folder inside', run: () => newFolder(path) },
+       ...(sk ? [] : [{ label: 'Link folder from disk…', run: () => linkFolder(path) }]), '-']
     : [{ label: 'Open', run: () => openNote(path) },
-       { label: isSketch(path) ? 'Sketch history…' : 'Page history…', run: () => openHistory(path) }, '-'];
+       { label: isSketch(path) ? 'Sketch history…' : 'Page history…', run: () => openHistory(path) },
+       ...(isSketch(path) ? [] : [{ label: 'Export as PDF…', run: () => exportPdf(path) }]), '-'];
   items.push(
     { label: 'Rename', run: () => startRename(path) },
     { label: 'Copy path', run: () => copyPath(path) },
     '-',
-    { label: 'Move to Trash', danger: true, run: () => trashItem(path) },
+    row.dataset.link
+      ? { label: 'Unlink folder', run: () => unlinkFolder(path) }
+      : { label: 'Move to Trash', danger: true, run: () => trashItem(path) },
   );
   showMenu(e.clientX, e.clientY, items);
 });
@@ -1454,6 +1491,7 @@ document.addEventListener('keydown', e => {
     }
     return;
   }
+  if (k === 'e' && e.shiftKey) { e.preventDefault(); exportPdf(); return; }
   if (k === 'k' || k === 'p') { e.preventDefault(); palette.hidden ? openPalette() : closePalette(); }
   else if (k === 'n' && e.shiftKey) { e.preventDefault(); newFolder(); }
   else if (e.code === 'KeyN' && e.altKey) { e.preventDefault(); newSketch(); }
