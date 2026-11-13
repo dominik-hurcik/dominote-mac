@@ -840,6 +840,7 @@ function save() {
 }
 async function flush() {
   snapshot();
+  await saveSketch();
   if (renameTimer) await renameCurrent();
   await save();
 }
@@ -891,6 +892,7 @@ function showCrumbs() {
   $('#crumbs').textContent = d ? d.split('/').join(' / ') : '';
 }
 function showEmpty() {
+  closeSketch(false);
   current = null;
   lastSaved = null;
   $('#page').hidden = true;
@@ -899,7 +901,9 @@ function showEmpty() {
 }
 
 async function openNote(path, { focusTitle = false } = {}) {
+  if (isSketch(path)) return openSketch(path);
   await flush();
+  await closeSketch();
   closeSlash();
   let md;
   try { md = await invoke('read_note', { path }); } catch (err) { toast(err); return; }
@@ -922,11 +926,22 @@ async function openNote(path, { focusTitle = false } = {}) {
 }
 
 async function newNote(dir = selectedDir) {
+  if (inSketches(dir)) dir = '';
   await flush();
   try {
     const path = await invoke('create_note', { dir });
     await refreshTree(true);
     await openNote(path, { focusTitle: true });
+  } catch (err) { toast(err); }
+}
+async function newSketch(dir = inSketches(selectedDir) ? selectedDir : SKETCHES) {
+  await flush();
+  try {
+    const path = await invoke('create_note', { dir, sketch: true });
+    if (dir !== SKETCHES) openDirs.add(dir);
+    await refreshTree(true);
+    await openNote(path);
+    startRename(path);
   } catch (err) { toast(err); }
 }
 async function newFolder(dir = selectedDir) {
@@ -943,6 +958,10 @@ function remap(from, to) {
   for (const [k, h] of [...histories]) {
     if (k === from || k.startsWith(from + '/')) { histories.delete(k); histories.set(to + k.slice(from.length), h); }
   }
+  if (sketchPath && (sketchPath === from || sketchPath.startsWith(from + '/'))) {
+    sketchPath = to + sketchPath.slice(from.length);
+    store.set('last', sketchPath);
+  }
   if (!current) return;
   if (current === from) current = to;
   else if (current.startsWith(from + '/')) current = to + current.slice(from.length);
@@ -952,8 +971,88 @@ function remap(from, to) {
   showCrumbs();
 }
 
+// ---------- sketches ----------
+// Whiteboards are Excalidraw files under Sketches/. The Excalidraw bundle (ui/sketch, built from
+// sketch/) is loaded the first time a sketch opens, so notes start as fast as before.
+const SKETCHES = 'Sketches';
+const isSketch = p => p.endsWith('.excalidraw');
+const inSketches = p => p === SKETCHES || p.startsWith(SKETCHES + '/');
+const sketchEl = $('#sketch');
+let sketch = null, sketchPath = null, sketchSaved = null, sketchTimer = null, sketchLib = null;
+function loadSketchLib() {
+  if (!sketchLib) {
+    window.EXCALIDRAW_ASSET_PATH = new URL('sketch/', location.href).href;
+    const css = document.createElement('link');
+    css.rel = 'stylesheet';
+    css.href = 'sketch/main.css';
+    document.head.append(css);
+    sketchLib = import('./sketch/main.js').catch(err => { sketchLib = null; throw err; });
+  }
+  return sketchLib;
+}
+const themeNow = () => settings.theme !== 'system' ? settings.theme
+  : matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+
+async function openSketch(path) {
+  await flush();
+  let json;
+  try { json = await invoke('read_note', { path }); } catch (err) { toast(err); return; }
+  await closeSketch();
+  closeSlash();
+  current = null;
+  lastSaved = null;
+  $('#page').hidden = true;
+  document.body.classList.add('sketching');
+  sketchEl.hidden = false;
+  sketchPath = path;
+  sketchSaved = json;
+  selectedDir = dirOf(path);
+  store.set('last', path);
+  expandTo(path);
+  markActive();
+  let lib;
+  try { lib = await loadSketchLib(); } catch (err) { toast('Could not load the whiteboard: ' + err); return; }
+  if (sketchPath !== path || sketch) return; // another file was opened while loading
+  sketch = lib.mount(sketchEl, {
+    json,
+    theme: themeNow(),
+    onChange: () => { clearTimeout(sketchTimer); sketchTimer = setTimeout(saveSketch, 400); },
+  });
+}
+function saveSketch() {
+  clearTimeout(sketchTimer);
+  sketchTimer = null;
+  const path = sketchPath, json = sketch?.json();
+  if (!path || !json || json === sketchSaved) return Promise.resolve();
+  sketchSaved = json;
+  return enqueue(() => invoke('write_note', { path, content: json })).catch(err => toast('Save failed: ' + err));
+}
+// save=false when the file is gone (trashed or deleted outside the app), so it isn't written back.
+async function closeSketch(save = true) {
+  if (sketch) {
+    if (save) await saveSketch();
+    sketch.unmount();
+    sketch = null;
+  }
+  clearTimeout(sketchTimer);
+  sketchTimer = null;
+  sketchPath = sketchSaved = null;
+  sketchEl.hidden = true;
+  document.body.classList.remove('sketching');
+}
+// Presenting: full screen without the sidebar. Works for notes and sketches.
+async function togglePresent() {
+  const win = window.__TAURI__.window.getCurrentWindow();
+  try {
+    const full = !(await win.isFullscreen());
+    await win.setFullscreen(full);
+    document.body.classList.toggle('no-sidebar', full);
+  } catch (err) { toast(err); }
+}
+
 // ---------- tree ----------
 const ICON_PAGE = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M4 1.5h5.5L13 5v9.5H4z"/><path d="M9.5 1.5V5H13"/></svg>';
+const ICON_SKETCH = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 14l1-4 8-8 3 3-8 8z"/><path d="M9.5 3.5l3 3"/></svg>';
 const ICON_FOLDER = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M1.5 3.5h4.5l1.5 1.5h7v8.5h-13z"/></svg>';
 
 async function refreshTree(force) {
@@ -963,9 +1062,26 @@ async function refreshTree(force) {
   if (!force && json === treeJson) return;
   treeJson = json;
   treeEl.replaceChildren();
-  if (!nodes.length) treeEl.innerHTML = '<div class="empty-tree">No pages yet</div>';
-  renderNodes(nodes, treeEl, 0);
+  const sk = nodes.find(n => n.dir && n.path === SKETCHES);
+  const notes = nodes.filter(n => n !== sk);
+  const emptyRow = text => Object.assign(document.createElement('div'), { className: 'empty-tree', textContent: text });
+  treeEl.append(sectionRow('Notes', ''));
+  if (!notes.length) treeEl.append(emptyRow('No pages yet'));
+  renderNodes(notes, treeEl, 0);
+  treeEl.append(sectionRow('Sketches', SKETCHES));
+  if (!sk?.children.length) treeEl.append(emptyRow('No sketches yet'));
+  renderNodes(sk?.children || [], treeEl, 0);
   markActive();
+}
+// Section headers act as drop targets: Notes for the top level, Sketches for the Sketches folder.
+function sectionRow(label, path) {
+  const row = document.createElement('div');
+  row.className = 'item section';
+  row.dataset.path = path;
+  row.dataset.dir = path ? '1' : '';
+  row.dataset.section = '1';
+  row.textContent = label;
+  return row;
 }
 function renderNodes(nodes, parent, depth) {
   for (const n of nodes) {
@@ -976,7 +1092,7 @@ function renderNodes(nodes, parent, depth) {
     row.draggable = true;
     row.style.paddingLeft = depth * 14 + 4 + 'px';
     const isOpen = openDirs.has(n.path);
-    row.innerHTML = `<span class="twisty">${n.dir ? (isOpen ? '▼' : '▶') : ''}</span><span class="icon">${n.dir ? ICON_FOLDER : ICON_PAGE}</span><span class="label"></span>`;
+    row.innerHTML = `<span class="twisty">${n.dir ? (isOpen ? '▼' : '▶') : ''}</span><span class="icon">${n.dir ? ICON_FOLDER : isSketch(n.path) ? ICON_SKETCH : ICON_PAGE}</span><span class="label"></span>`;
     row.querySelector('.label').textContent = n.name;
     parent.append(row);
     if (n.dir && isOpen) {
@@ -992,7 +1108,8 @@ function renderNodes(nodes, parent, depth) {
   }
 }
 function markActive() {
-  for (const el of treeEl.querySelectorAll('.item')) el.classList.toggle('active', el.dataset.path === current);
+  const open = current || sketchPath;
+  for (const el of treeEl.querySelectorAll('.item')) el.classList.toggle('active', el.dataset.path === open);
 }
 function expandTo(path) {
   const parts = path.split('/');
@@ -1006,7 +1123,7 @@ function expandTo(path) {
 
 treeEl.addEventListener('click', e => {
   const row = e.target.closest('.item');
-  if (!row || row.querySelector('input')) return;
+  if (!row || row.dataset.section || row.querySelector('input')) return;
   const path = row.dataset.path;
   if (row.dataset.dir) {
     selectedDir = path;
@@ -1054,7 +1171,8 @@ async function trashItem(path) {
   await flush();
   try {
     await enqueue(() => invoke('delete', { path }));
-    if (current && (current === path || current.startsWith(path + '/'))) showEmpty();
+    const open = current || sketchPath;
+    if (open && (open === path || open.startsWith(path + '/'))) showEmpty();
     toast('Moved to Trash');
     refreshTree(true);
   } catch (err) { toast(err); }
@@ -1132,19 +1250,29 @@ const copyPath = p => navigator.clipboard.writeText(rootDir + (p ? '/' + p : '')
 $('#sidebar').addEventListener('contextmenu', e => {
   e.preventDefault();
   const row = e.target.closest('.item');
-  if (!row) {
+  if (row?.dataset.path === SKETCHES) {
+    return showMenu(e.clientX, e.clientY, [
+      { label: 'New sketch', run: () => newSketch(SKETCHES) },
+      { label: 'New folder', run: () => newFolder(SKETCHES) },
+      '-',
+      { label: 'Copy sketches folder path', run: () => copyPath(SKETCHES) },
+    ]);
+  }
+  if (!row || row.dataset.section) {
     return showMenu(e.clientX, e.clientY, [
       { label: 'New page', run: () => newNote('') },
+      { label: 'New sketch', run: () => newSketch(SKETCHES) },
       { label: 'New folder', run: () => newFolder('') },
       '-',
       { label: 'Copy notes folder path', run: () => copyPath('') },
     ]);
   }
-  const path = row.dataset.path;
+  const path = row.dataset.path, sk = inSketches(path);
   const items = row.dataset.dir
-    ? [{ label: 'New page inside', run: () => { openDirs.add(path); newNote(path); } },
+    ? [{ label: sk ? 'New sketch inside' : 'New page inside', run: () => { openDirs.add(path); sk ? newSketch(path) : newNote(path); } },
        { label: 'New folder inside', run: () => newFolder(path) }, '-']
-    : [{ label: 'Open', run: () => openNote(path) }, { label: 'Page history…', run: () => openHistory(path) }, '-'];
+    : [{ label: 'Open', run: () => openNote(path) },
+       { label: isSketch(path) ? 'Sketch history…' : 'Page history…', run: () => openHistory(path) }, '-'];
   items.push(
     { label: 'Rename', run: () => startRename(path) },
     { label: 'Copy path', run: () => copyPath(path) },
@@ -1200,7 +1328,7 @@ function ago(secs) {
   const rel = mins < 60 ? `${mins} min ago` : mins < 1440 ? `${Math.round(mins / 60)} h ago` : `${Math.round(mins / 1440)} d ago`;
   return `${time} · ${rel}`;
 }
-async function openHistory(path = current) {
+async function openHistory(path = current || sketchPath) {
   if (!path) return;
   await flush();
   let list;
@@ -1218,6 +1346,12 @@ async function openHistory(path = current) {
 async function restoreVersion(path, v) {
   let md;
   try { md = await invoke('read_version', { path, id: v.id }); } catch (err) { return toast(err); }
+  if (isSketch(path)) {
+    if (path !== sketchPath || !sketch) await openSketch(path);
+    if (path !== sketchPath || !sketch) return;
+    sketch.load(md);
+    return toast('Restored. Press ⌘Z to undo.');
+  }
   if (path !== current) await openNote(path);
   if (path !== current) return;
   render(md);
@@ -1270,7 +1404,9 @@ function applySettings() {
   root.style.setProperty('--code-font', fontStack(settings.codeFont));
   root.style.setProperty('--page-size', settings.pageSize + 'px');
   for (const b of $('#theme-seg').children) b.classList.toggle('on', b.dataset.theme === settings.theme);
+  sketch?.setTheme(themeNow());
 }
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => sketch?.setTheme(themeNow()));
 function setSetting(k, v) {
   settings[k] = v;
   store.set('settings', settings);
@@ -1302,6 +1438,7 @@ $('#settings-btn').onclick = openSettings;
 $('#search-btn').onclick = openPalette;
 $('#new-note-btn').onclick = () => newNote();
 $('#new-folder-btn').onclick = () => newFolder();
+$('#new-sketch-btn').onclick = () => newSketch();
 $('#root-path').onclick = () => copyPath('');
 
 document.addEventListener('keydown', e => {
@@ -1319,6 +1456,8 @@ document.addEventListener('keydown', e => {
   }
   if (k === 'k' || k === 'p') { e.preventDefault(); palette.hidden ? openPalette() : closePalette(); }
   else if (k === 'n' && e.shiftKey) { e.preventDefault(); newFolder(); }
+  else if (e.code === 'KeyN' && e.altKey) { e.preventDefault(); newSketch(); }
+  else if (k === 'f' && e.shiftKey) { e.preventDefault(); togglePresent(); }
   else if (k === 'n') { e.preventDefault(); newNote(); }
   else if (k === 's') { e.preventDefault(); flush(); }
   else if (k === ',') { e.preventDefault(); settingsEl.hidden ? openSettings() : (settingsEl.hidden = true); }
@@ -1329,6 +1468,13 @@ document.addEventListener('keydown', e => {
 setInterval(() => {
   refreshTree().catch(() => {});
   enqueue(async () => {
+    if (sketchPath && sketch && !sketchTimer) {
+      const path = sketchPath;
+      let json;
+      try { json = await invoke('read_note', { path }); } catch { return showEmpty(); }
+      if (path === sketchPath && json !== sketchSaved) { sketchSaved = json; sketch.load(json); }
+      return;
+    }
     if (!current || saveTimer || renameTimer) return;
     let md;
     try { md = await invoke('read_note', { path: current }); } catch { return showEmpty(); }

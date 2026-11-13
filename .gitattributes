@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Built bundles: keep them out of GitHub language stats
+ui/sketch/** linguist-vendored
+ui/vendor/** linguist-vendored

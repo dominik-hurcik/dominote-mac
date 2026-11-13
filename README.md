@@ -32,8 +32,8 @@
 
 Most note apps ship a full browser engine, sync servers and a database. Dominote doesn't.
 
-- **4 MB app.** Tauri uses the WebKit engine already in macOS, so there is no bundled Chromium.
-- **Rust for the app, plain JavaScript for the editor.** Rust runs the native window and all file access: saving, renaming, moving, Trash and search. The editor is plain JavaScript and CSS with no framework, about 1,600 lines.
+- **7 MB app.** Tauri uses the WebKit engine already in macOS, so there is no bundled Chromium.
+- **Rust for the app, plain JavaScript for the editor.** Rust runs the native window and all file access: saving, renaming, moving, Trash and search. The note editor is plain JavaScript and CSS with no framework. Sketches use Excalidraw, which loads only when you open one.
 - **No database, no account, no network.** Every page is a `.md` file in `~/Documents/Dominote`. Folders in the sidebar are real folders on disk.
 - **Your files stay readable.** Open them in any editor, put them in Git, or sync them with iCloud Drive or Dropbox.
 
@@ -45,6 +45,8 @@ Most note apps ship a full browser engine, sync servers and a database. Dominote
 - Paste formatted text from Claude, web pages and other apps. Tables, headings, lists and code keep their structure.
 - Folders and pages in a sidebar. Drag to move, right-click to rename, deleted items go to the macOS Trash.
 - Search across titles and page text with ⌘K.
+- Sketches: a whiteboard for brainstorming and presenting, powered by [Excalidraw](https://github.com/excalidraw/excalidraw). Shapes, arrows, freehand drawing, text and images, saved as `.excalidraw` files you can also open on excalidraw.com.
+- Present mode with ⇧⌘F: full screen without the sidebar, for a page or a sketch.
 - Drag across blocks to select several, then copy them as Markdown, cut or delete.
 - Light and dark themes, and a choice of fonts for the menus, the page and code.
 - Autosave on every change, written atomically so a crash can't corrupt a note.
@@ -101,6 +103,8 @@ See [Build from source](#build-from-source).
 | --- | --- |
 | New page | ⌘N |
 | New folder | ⇧⌘N |
+| New sketch | ⌥⌘N |
+| Present (full screen) | ⇧⌘F |
 | Search | ⌘K |
 | Settings | ⌘, |
 | Toggle sidebar | ⌘\ |
@@ -130,6 +134,8 @@ ln -s ~/Library/Mobile\ Documents/com~apple~CloudDocs/Dominote ~/Documents/Domin
 ```
 
 ### File format
+
+Sketches are Excalidraw JSON files in the `Sketches` folder. An agent can draw by adding elements to the `elements` array, and the open sketch updates within 2 seconds.
 
 Pages are GitHub-flavored Markdown. The page title is the file name.
 
@@ -162,11 +168,18 @@ An app you build yourself opens without any Gatekeeper warning.
 ### Project layout
 
 ```
-src/main.rs     Rust backend: file tree, read, write, rename, move, trash, search
+src/main.rs     Rust backend: file tree, read, write, rename, move, trash, search, history
 ui/app.js       Editor, sidebar, slash menu, search, settings
 ui/md.js        Markdown parser and serializer
 ui/style.css    Themes and layout
+sketch/         Excalidraw wrapper, bundled into ui/sketch
 tests/          Markdown round-trip test
+```
+
+The built whiteboard bundle in `ui/sketch` is checked in, so a normal build needs no extra steps. After changing `sketch/main.jsx` or the Excalidraw version, rebuild it:
+
+```sh
+cd sketch && npm ci && npm run build
 ```
 
 ### Tests

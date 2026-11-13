@@ -67,7 +67,7 @@ fn walk(dir: &Path) -> Vec<Node> {
             if p.is_dir() {
                 Some(Node { name, path: rel(&p), dir: true, children: walk(&p) })
             } else {
-                let title = name.strip_suffix(".md")?.to_string();
+                let title = name.strip_suffix(".md").or_else(|| name.strip_suffix(SKETCH))?.to_string();
                 Some(Node { name: title, path: rel(&p), dir: false, children: vec![] })
             }
         })
@@ -81,8 +81,13 @@ fn root_dir() -> String {
     root().to_string_lossy().to_string()
 }
 
+/// Whiteboards are Excalidraw files. They live in the Sketches folder, shown as its own sidebar section.
+const SKETCH: &str = ".excalidraw";
+const EMPTY_SKETCH: &str = r#"{"type":"excalidraw","version":2,"source":"dominote","elements":[],"appState":{},"files":{}}"#;
+
 #[tauri::command]
 fn tree() -> Vec<Node> {
+    let _ = fs::create_dir_all(root().join("Sketches"));
     walk(&root())
 }
 
@@ -186,11 +191,12 @@ fn read_version(path: String, id: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn create_note(dir: String) -> Result<String, String> {
+fn create_note(dir: String, sketch: Option<bool>) -> Result<String, String> {
     let d = resolve(&dir)?;
     fs::create_dir_all(&d).map_err(|e| e.to_string())?;
-    let p = unique(&d, "Untitled", ".md");
-    fs::write(&p, "").map_err(|e| e.to_string())?;
+    let sketch = sketch.unwrap_or(false);
+    let p = unique(&d, "Untitled", if sketch { SKETCH } else { ".md" });
+    fs::write(&p, if sketch { EMPTY_SKETCH } else { "" }).map_err(|e| e.to_string())?;
     Ok(rel(&p))
 }
 
@@ -206,7 +212,7 @@ fn rename(path: String, name: String) -> Result<String, String> {
     let from = resolve(&path)?;
     let mut name = clean_name(&name)?;
     if from.is_file() {
-        name.push_str(".md");
+        name.push_str(if path.ends_with(SKETCH) { SKETCH } else { ".md" });
     }
     let to = from.with_file_name(name);
     if to == from {
@@ -265,7 +271,7 @@ fn search(query: String) -> Vec<Hit> {
             }
             if p.is_dir() {
                 notes(&p, out);
-            } else if p.extension().is_some_and(|x| x == "md") {
+            } else if p.extension().is_some_and(|x| x == "md" || x == "excalidraw") {
                 out.push(p);
             }
         }
@@ -280,7 +286,7 @@ fn search(query: String) -> Vec<Hit> {
         let path = rel(&p);
         if title.to_lowercase().contains(&q) {
             title_hits.push(Hit { snippet: path.clone(), path, title });
-        } else if !q.is_empty() {
+        } else if !q.is_empty() && p.extension().is_some_and(|x| x == "md") {
             let body = fs::read_to_string(&p).unwrap_or_default();
             if let Some(i) = body.to_lowercase().find(&q) {
                 // Snippet around the match; lowercase can shift byte offsets, so clamp to char boundaries.
@@ -309,6 +315,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Tests that point DOMINOTE_DIR at a temp folder must not run at the same time.
+    static ROOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn resolve_rejects_escapes() {
@@ -316,6 +324,21 @@ mod tests {
         assert!(resolve("/etc/passwd").is_err());
         assert!(resolve("a/../../b").is_err());
         assert!(resolve("Work/Ideas.md").is_ok());
+    }
+
+    #[test]
+    fn sketch_rename_keeps_extension() {
+        let _lock = ROOT.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("dominote-sketch-{}", std::process::id()));
+        std::env::set_var("DOMINOTE_DIR", &dir);
+        let _ = fs::remove_dir_all(&dir);
+        let p = create_note("Sketches".into(), Some(true)).unwrap();
+        assert_eq!(p, "Sketches/Untitled.excalidraw");
+        assert_eq!(rename(p, "Plan".into()).unwrap(), "Sketches/Plan.excalidraw");
+        let t = tree();
+        assert_eq!(t[0].name, "Sketches");
+        assert_eq!(t[0].children[0].name, "Plan");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -327,6 +350,7 @@ mod tests {
 
     #[test]
     fn backup_keeps_old_text_once_per_interval() {
+        let _lock = ROOT.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("dominote-test-{}", std::process::id()));
         std::env::set_var("DOMINOTE_DIR", &dir);
         let _ = fs::remove_dir_all(&dir);
