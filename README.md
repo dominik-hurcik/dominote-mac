@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/dominik-hurcik/dominote-mac/releases/latest"><img src="https://img.shields.io/github/v/release/dominik-hurcik/dominote-mac?label=download" alt="Latest release"></a>
+  <a href="https://github.com/dominik-hurcik/dominote-mac/releases/latest"><img src="https://img.shields.io/github/v/release/dominik-hurcik/dominote-mac?label=download&cacheSeconds=3600" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/platform-macOS%2011%2B-lightgrey" alt="macOS 11+">
   <img src="https://img.shields.io/badge/built%20with-Rust%20%2B%20Tauri-orange" alt="Built with Rust and Tauri">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license"></a>
