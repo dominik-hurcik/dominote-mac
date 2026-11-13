@@ -96,8 +96,93 @@ fn write_note(path: String, content: String) -> Result<(), String> {
     let p = resolve(&path)?;
     // Write to a temp file then rename, so a crash mid-write never corrupts a note.
     let tmp = p.with_file_name(format!(".{}.tmp", p.file_name().unwrap().to_string_lossy()));
-    fs::write(&tmp, content).map_err(|e| e.to_string())?;
+    fs::write(&tmp, &content).map_err(|e| e.to_string())?;
+    backup(&path, &p, &content);
     fs::rename(&tmp, &p).map_err(|e| e.to_string())
+}
+
+// ---------- page history ----------
+// Before a save overwrites a page, its previous text is copied to
+// <root>/.dominote/history/<page path>/<unix seconds>.md, at most once every 10 minutes.
+// That keeps a version from before each editing session, so a bad edit can be rolled back
+// even after the app restarts. Hidden from the sidebar and search like any dot folder.
+const BACKUP_EVERY: u64 = 10 * 60;
+const KEEP_VERSIONS: usize = 100;
+
+fn history_dir(rel_path: &str) -> PathBuf {
+    root().join(".dominote/history").join(rel_path)
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// Version ids (unix seconds), newest first.
+fn version_ids(dir: &Path) -> Vec<u64> {
+    let mut ids: Vec<u64> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_string_lossy().strip_suffix(".md")?.parse().ok())
+        .collect();
+    ids.sort_unstable_by(|a, b| b.cmp(a));
+    ids
+}
+
+fn backup(rel_path: &str, p: &Path, new: &str) {
+    let Ok(old) = fs::read_to_string(p) else { return };
+    if old.trim().is_empty() || old == new {
+        return;
+    }
+    let dir = history_dir(rel_path);
+    let ids = version_ids(&dir);
+    let t = now();
+    if ids.first().is_some_and(|&last| t.saturating_sub(last) < BACKUP_EVERY) {
+        return;
+    }
+    if fs::create_dir_all(&dir).is_err() || fs::write(dir.join(format!("{t}.md")), old).is_err() {
+        return;
+    }
+    for id in ids.iter().skip(KEEP_VERSIONS - 1) {
+        let _ = fs::remove_file(dir.join(format!("{id}.md")));
+    }
+}
+
+/// Keep a page's or folder's history attached to it after a rename or move.
+fn move_history(from: &str, to: &str) {
+    let (a, b) = (history_dir(from), history_dir(to));
+    if a.exists() && !b.exists() {
+        if let Some(parent) = b.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::rename(a, b);
+    }
+}
+
+#[derive(Serialize)]
+struct Version {
+    id: String,
+    words: usize,
+}
+
+#[tauri::command]
+fn history(path: String) -> Result<Vec<Version>, String> {
+    resolve(&path)?;
+    let dir = history_dir(&path);
+    Ok(version_ids(&dir)
+        .into_iter()
+        .map(|id| Version {
+            id: id.to_string(),
+            words: fs::read_to_string(dir.join(format!("{id}.md"))).map_or(0, |s| s.split_whitespace().count()),
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn read_version(path: String, id: String) -> Result<String, String> {
+    resolve(&path)?;
+    let id: u64 = id.parse().map_err(|_| "invalid version")?;
+    fs::read_to_string(history_dir(&path).join(format!("{id}.md"))).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -132,6 +217,7 @@ fn rename(path: String, name: String) -> Result<String, String> {
         return Err("a page or folder with that name already exists".into());
     }
     fs::rename(&from, &to).map_err(|e| e.to_string())?;
+    move_history(&path, &rel(&to));
     Ok(rel(&to))
 }
 
@@ -150,6 +236,7 @@ fn move_item(path: String, dir: String) -> Result<String, String> {
         return Err("an item with that name already exists there".into());
     }
     fs::rename(&from, &to).map_err(|e| e.to_string())?;
+    move_history(&path, &rel(&to));
     Ok(rel(&to))
 }
 
@@ -212,7 +299,8 @@ fn search(query: String) -> Vec<Hit> {
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
-            root_dir, tree, read_note, write_note, create_note, create_folder, rename, move_item, delete, search
+            root_dir, tree, read_note, write_note, create_note, create_folder, rename, move_item, delete, search,
+            history, read_version
         ])
         .run(tauri::generate_context!())
         .expect("error while running Dominote");
@@ -235,5 +323,22 @@ mod tests {
         assert_eq!(clean_name(" a/b ").unwrap(), "a-b");
         assert!(clean_name("  ").is_err());
         assert!(clean_name(".hidden").is_err());
+    }
+
+    #[test]
+    fn backup_keeps_old_text_once_per_interval() {
+        let dir = std::env::temp_dir().join(format!("dominote-test-{}", std::process::id()));
+        std::env::set_var("DOMINOTE_DIR", &dir);
+        let _ = fs::remove_dir_all(&dir);
+        write_note("a.md".into(), "one".into()).unwrap();
+        write_note("a.md".into(), "two".into()).unwrap();
+        write_note("a.md".into(), "three".into()).unwrap();
+        let v = history("a.md".into()).unwrap();
+        assert_eq!(v.len(), 1, "second change within 10 minutes is not backed up");
+        assert_eq!(read_version("a.md".into(), v[0].id.clone()).unwrap(), "one");
+        rename("a.md".into(), "b".into()).unwrap();
+        assert_eq!(history("b.md".into()).unwrap().len(), 1);
+        assert!(read_version("b.md".into(), "../../x".into()).is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

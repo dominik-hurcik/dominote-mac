@@ -230,7 +230,11 @@ function renumber() {
   }
 }
 
-function changed() { scheduleSave(); }
+function changed() {
+  scheduleSave();
+  clearTimeout(snapTimer);
+  snapTimer = setTimeout(snapshot, 600);
+}
 
 // Replace a block with one of another type; returns the new block.
 function setType(block, type, caret = 0) {
@@ -574,6 +578,14 @@ editor.addEventListener('input', e => {
   changed();
 });
 
+// Edit > Undo from the menu bar goes through the same page history as ⌘Z.
+editor.addEventListener('beforeinput', e => {
+  if (e.inputType === 'historyUndo' || e.inputType === 'historyRedo') {
+    e.preventDefault();
+    undo(e.inputType === 'historyUndo' ? -1 : 1);
+  }
+});
+
 editor.addEventListener('change', e => {
   if (e.target.classList.contains('check')) {
     e.target.closest('.block').classList.toggle('done', e.target.checked);
@@ -825,8 +837,46 @@ function save() {
   }).catch(err => toast('Save failed: ' + err));
 }
 async function flush() {
+  snapshot();
   if (renameTimer) await renameCurrent();
   await save();
+}
+
+// ---------- undo ----------
+// Native undo only sees typing inside one field. It can't follow block splits, merges,
+// table edits, pasted blocks or a reload, so the app keeps whole-page snapshots instead.
+// One history per page, kept while the app runs, so switching pages doesn't lose it.
+const histories = new Map(); // path -> { states: [{ md, at }], i }
+let snapTimer = null;
+function focusedIndex() {
+  const b = document.activeElement?.closest?.('#editor > .block');
+  return b ? [...editor.children].indexOf(b) : -1;
+}
+function snapshot() {
+  clearTimeout(snapTimer);
+  snapTimer = null;
+  if (!current) return;
+  const md = serializeDoc();
+  let h = histories.get(current);
+  if (!h) return histories.set(current, { states: [{ md, at: focusedIndex() }], i: 0 });
+  if (md === h.states[h.i].md) return;
+  h.states.length = h.i + 1;
+  h.states.push({ md, at: focusedIndex() });
+  if (h.states.length > 500) h.states.shift();
+  h.i = h.states.length - 1;
+}
+function undo(step) {
+  snapshot();
+  const h = histories.get(current);
+  const j = h ? h.i + step : -1;
+  if (j < 0 || j >= h.states.length) return;
+  // Put the caret where the undone (or redone) change happened.
+  const at = h.states[step < 0 ? h.i : j].at;
+  h.i = j;
+  render(h.states[j].md);
+  const n = editor.children.length;
+  focusBlock(editor.children[Math.min(Math.max(at, 0), n - 1)], 'end');
+  scheduleSave();
 }
 
 function render(md) {
@@ -858,6 +908,7 @@ async function openNote(path, { focusTitle = false } = {}) {
   titleEl.textContent = base(path);
   showCrumbs();
   render(md);
+  snapshot();
   $('#page').hidden = false;
   $('#main').scrollTop = 0;
   expandTo(path);
@@ -887,6 +938,9 @@ async function newFolder(dir = selectedDir) {
 
 // Keep the open note pointed at the right file after its folder or itself moves.
 function remap(from, to) {
+  for (const [k, h] of [...histories]) {
+    if (k === from || k.startsWith(from + '/')) { histories.delete(k); histories.set(to + k.slice(from.length), h); }
+  }
   if (!current) return;
   if (current === from) current = to;
   else if (current.startsWith(from + '/')) current = to + current.slice(from.length);
@@ -1088,7 +1142,7 @@ $('#sidebar').addEventListener('contextmenu', e => {
   const items = row.dataset.dir
     ? [{ label: 'New page inside', run: () => { openDirs.add(path); newNote(path); } },
        { label: 'New folder inside', run: () => newFolder(path) }, '-']
-    : [{ label: 'Open', run: () => openNote(path) }, '-'];
+    : [{ label: 'Open', run: () => openNote(path) }, { label: 'Page history…', run: () => openHistory(path) }, '-'];
   items.push(
     { label: 'Rename', run: () => startRename(path) },
     { label: 'Copy path', run: () => copyPath(path) },
@@ -1101,13 +1155,16 @@ $('#sidebar').addEventListener('contextmenu', e => {
 // ---------- search palette ----------
 const palette = $('#palette'), pInput = $('#palette-input'), pResults = $('#palette-results');
 let hits = [], hitIndex = 0, searchTimer = null;
+let historyPath = null; // set while the palette lists saved versions of a page
 function openPalette() {
+  historyPath = null;
+  pInput.placeholder = 'Search pages…';
   palette.hidden = false;
   pInput.value = '';
   runSearch();
   pInput.focus();
 }
-function closePalette() { palette.hidden = true; }
+function closePalette() { palette.hidden = true; pInput.blur(); }
 async function runSearch() {
   hits = await invoke('search', { query: pInput.value.trim() });
   hitIndex = 0;
@@ -1128,9 +1185,48 @@ function renderHits() {
 }
 function pick(i) {
   closePalette();
-  if (hits[i]) openNote(hits[i].path);
+  if (!hits[i]) return;
+  if (historyPath) restoreVersion(historyPath, hits[i]);
+  else openNote(hits[i].path);
 }
-pInput.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 60); });
+
+// ---------- page history ----------
+// The backend copies a page's previous text aside at most every 10 minutes while it is edited.
+function ago(secs) {
+  const d = new Date(secs * 1000), mins = Math.round((Date.now() - d) / 60000);
+  const time = d.toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const rel = mins < 60 ? `${mins} min ago` : mins < 1440 ? `${Math.round(mins / 60)} h ago` : `${Math.round(mins / 1440)} d ago`;
+  return `${time} · ${rel}`;
+}
+async function openHistory(path = current) {
+  if (!path) return;
+  await flush();
+  let list;
+  try { list = await invoke('history', { path }); } catch (err) { return toast(err); }
+  if (!list.length) return toast('No older versions yet. One is saved every 10 minutes while you edit.');
+  historyPath = path;
+  hits = list.map(v => ({ id: v.id, title: ago(+v.id), snippet: `${v.words} words` }));
+  hitIndex = 0;
+  pInput.value = '';
+  pInput.placeholder = `Restore an older version of “${base(path)}”`;
+  palette.hidden = false;
+  pInput.focus();
+  renderHits();
+}
+async function restoreVersion(path, v) {
+  let md;
+  try { md = await invoke('read_version', { path, id: v.id }); } catch (err) { return toast(err); }
+  if (path !== current) await openNote(path);
+  if (path !== current) return;
+  render(md);
+  snapshot();
+  scheduleSave();
+  focusBlock(editor.firstElementChild, 0);
+  toast('Restored. Press ⌘Z to undo.');
+}
+
+pInput.addEventListener('input', () => {
+  if (historyPath) return; clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 60); });
 pInput.addEventListener('keydown', e => {
   if (e.key === 'ArrowDown') { e.preventDefault(); hitIndex = Math.min(hitIndex + 1, hits.length - 1); renderHits(); }
   else if (e.key === 'ArrowUp') { e.preventDefault(); hitIndex = Math.max(hitIndex - 1, 0); renderHits(); }
@@ -1210,6 +1306,15 @@ document.addEventListener('keydown', e => {
   const mod = e.metaKey || e.ctrlKey;
   if (!mod) return;
   const k = e.key.toLowerCase();
+  if (k === 'z' || k === 'y') {
+    // Page undo whenever the page has focus or blocks are selected; native undo elsewhere (title, search).
+    const a = document.activeElement;
+    if (current && palette.hidden && settingsEl.hidden && (editor.contains(a) || a === document.body || !a)) {
+      e.preventDefault();
+      undo(k === 'y' || e.shiftKey ? 1 : -1);
+    }
+    return;
+  }
   if (k === 'k' || k === 'p') { e.preventDefault(); palette.hidden ? openPalette() : closePalette(); }
   else if (k === 'n' && e.shiftKey) { e.preventDefault(); newFolder(); }
   else if (k === 'n') { e.preventDefault(); newNote(); }
@@ -1225,7 +1330,7 @@ setInterval(() => {
     if (!current || saveTimer || renameTimer) return;
     let md;
     try { md = await invoke('read_note', { path: current }); } catch { return showEmpty(); }
-    if (md !== lastSaved) { lastSaved = md; render(md); }
+    if (md !== lastSaved) { lastSaved = md; render(md); snapshot(); }
   });
 }, 2000);
 window.addEventListener('blur', () => flush());

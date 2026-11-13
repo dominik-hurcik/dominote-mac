@@ -48,6 +48,8 @@ Most note apps ship a full browser engine, sync servers and a database. Dominote
 - Drag across blocks to select several, then copy them as Markdown, cut or delete.
 - Light and dark themes, and a choice of fonts for the menus, the page and code.
 - Autosave on every change, written atomically so a crash can't corrupt a note.
+- Undo and redo for every change on a page, including deleted blocks, table edits and changes made by an AI agent.
+- Page history. Right-click a page and choose **Page history** to restore an older version. A copy is kept every 10 minutes while you edit, in `.dominote/history` inside your notes folder.
 
 <table>
   <tr>
@@ -106,6 +108,7 @@ See [Build from source](#build-from-source).
 | Strikethrough | ⇧⌘X |
 | Indent or outdent a list item | Tab, ⇧Tab |
 | Move a block up or down | ⇧⌘↑, ⇧⌘↓ |
+| Undo, redo | ⌘Z, ⇧⌘Z |
 | Select all blocks | ⌘A twice |
 | Leave a code block or table | Esc or ⌘Enter |
 
