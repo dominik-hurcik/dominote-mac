@@ -5,7 +5,7 @@
 <h1 align="center">Dominote</h1>
 
 <p align="center">
-  A fast, open source note-taking app for macOS, written in Rust.<br>
+  A fast, open source note-taking app for macOS, built with Rust and Tauri.<br>
   Your notes are plain Markdown files in a folder you own.
 </p>
 
@@ -33,7 +33,7 @@
 Most note apps ship a full browser engine, sync servers and a database. Dominote doesn't.
 
 - **4 MB app.** Tauri uses the WebKit engine already in macOS, so there is no bundled Chromium.
-- **No framework.** The editor is about 1,900 lines of plain JavaScript, CSS and Rust.
+- **Rust for the app, plain JavaScript for the editor.** Rust runs the native window and all file access: saving, renaming, moving, Trash and search. The editor is plain JavaScript and CSS with no framework, about 1,600 lines.
 - **No database, no account, no network.** Every page is a `.md` file in `~/Documents/Dominote`. Folders in the sidebar are real folders on disk.
 - **Your files stay readable.** Open them in any editor, put them in Git, or sync them with iCloud Drive or Dropbox.
 
