@@ -144,14 +144,17 @@ function makeBlock(b) {
     c.innerHTML = MD.inlineToHtml(b.text || '');
     el.append(c);
   } else if (b.type === 'code') {
-    el.innerHTML = '<div class="code-bar"><input class="lang" placeholder="language" spellcheck="false"><button class="copy" tabindex="-1">Copy</button></div>';
+    el.innerHTML = '<div class="code-bar"><input class="lang" placeholder="language" spellcheck="false" list="lang-list"><button class="copy" tabindex="-1">Copy</button></div>' +
+      '<div class="code-wrap"><pre class="hl" aria-hidden="true"></pre></div>';
     el.querySelector('.lang').value = b.lang || '';
     const pre = document.createElement('pre');
     pre.className = 'content';
     pre.contentEditable = 'plaintext-only';
     pre.spellcheck = false;
+    pre.setAttribute('autocorrect', 'off');
     pre.textContent = b.text || '';
-    el.append(pre);
+    el.querySelector('.code-wrap').append(pre);
+    highlight(el);
   } else if (b.type === 'table') {
     const rows = b.rows || [['', '', ''], ['', '', ''], ['', '', '']];
     const t = document.createElement('table');
@@ -178,6 +181,24 @@ function makeBlock(b) {
     el.innerHTML = '<hr>';
   }
   return el;
+}
+
+// Syntax colors: the editable <pre> has transparent text and sits on top of a highlighted copy.
+// This keeps the caret, selection and undo of a plain editable field.
+function highlight(block) {
+  const text = content(block).textContent;
+  const langEl = block.querySelector('.lang');
+  const lang = langEl.value.trim().toLowerCase();
+  let html;
+  try {
+    if (lang && hljs.getLanguage(lang)) html = hljs.highlight(text, { language: lang, ignoreIllegals: true }).value;
+    else if (!lang && text.length < 20000) {
+      const r = hljs.highlightAuto(text);
+      html = r.value;
+      langEl.placeholder = r.language && r.relevance > 4 ? r.language + ' (auto)' : 'language';
+    }
+  } catch {}
+  block.querySelector('.hl').innerHTML = (html ?? MD.esc(text)) + '\n';
 }
 
 function readBlock(el) {
@@ -514,6 +535,7 @@ editor.addEventListener('input', e => {
   if (!block) return;
   const type = block.dataset.type;
   const c = e.target.closest('.content');
+  if (type === 'code') highlight(block);
   if (c && TEXT.has(type)) {
     if (c.innerHTML === '<br>') c.innerHTML = '';
     const text = c.textContent.replace(/ /g, ' ');
@@ -1000,6 +1022,7 @@ function setSetting(k, v) {
   store.set('settings', settings);
   applySettings();
 }
+$('#lang-list').innerHTML = hljs.listLanguages().map(l => `<option value="${l}">`).join('');
 $('#font-list').innerHTML = Object.keys(FONTS).map(f => `<option value="${f}">`).join('');
 const fontInputs = { uiFont: '#set-ui-font', pageFont: '#set-page-font', codeFont: '#set-code-font' };
 for (const [k, sel] of Object.entries(fontInputs)) {
