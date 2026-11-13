@@ -583,8 +583,10 @@ editor.addEventListener('beforeinput', e => {
   if (e.inputType === 'historyUndo' || e.inputType === 'historyRedo') {
     e.preventDefault();
     undo(e.inputType === 'historyUndo' ? -1 : 1);
-  }
+  } else if (snapTimer && e.inputType === 'insertText' && e.data === ' ') snapshot(); // one undo step per word
 });
+// Moving to another block or table cell starts a new undo step.
+editor.addEventListener('focusin', () => { if (snapTimer) snapshot(); });
 
 editor.addEventListener('change', e => {
   if (e.target.classList.contains('check')) {
