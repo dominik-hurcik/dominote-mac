@@ -26,6 +26,7 @@ jobs:
       - name: Test
         run: |
           node tests/md.test.js
+          node tests/view.test.js
           cargo test
 
       - name: Build

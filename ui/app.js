@@ -34,6 +34,41 @@ const store = {
 };
 const openDirs = new Set(store.get('openDirs', []));
 
+// View preferences stay on this Mac, separate from Markdown content.
+const pageViews = store.get('pageViews', {});
+const pageView = $('#page-view');
+function applyPageView() {
+  const view = pageViews[current] || {};
+  const zoom = [100, 90, 80, 70].includes(view.zoom) ? view.zoom : 100;
+  $('#page').style.setProperty('--view-zoom', zoom / 100);
+  $('#page').classList.toggle('full-width', view.wide === true);
+  $('#view-wide').checked = view.wide === true;
+  $('#view-zoom').value = zoom;
+  pageView.hidden = !current;
+  pageView.open = false;
+}
+pageView.addEventListener('change', () => {
+  if (!current) return;
+  pageViews[current] = { wide: $('#view-wide').checked, zoom: Number($('#view-zoom').value) };
+  store.set('pageViews', pageViews);
+  applyPageView();
+});
+document.addEventListener('pointerdown', e => {
+  if (!pageView.contains(e.target)) pageView.open = false;
+});
+pageView.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { pageView.open = false; pageView.querySelector('summary').focus(); }
+});
+function remapPageViews(from, to) {
+  for (const path of Object.keys(pageViews)) {
+    if (path === from || path.startsWith(from + '/')) {
+      pageViews[to + path.slice(from.length)] = pageViews[path];
+      delete pageViews[path];
+    }
+  }
+  store.set('pageViews', pageViews);
+}
+
 // ---------- helpers ----------
 const base = p => p.split('/').pop().replace(/\.md$/, '');
 const dirOf = p => p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '';
@@ -813,6 +848,7 @@ function renameCurrent() {
     if (!current || !name || name === base(current)) return;
     try {
       const np = await invoke('rename', { path: current, name });
+      remapPageViews(current, np);
       current = np;
       store.set('last', current);
       showCrumbs();
@@ -896,6 +932,7 @@ function showEmpty() {
   current = null;
   lastSaved = null;
   $('#page').hidden = true;
+  applyPageView();
   store.set('last', null);
   markActive();
 }
@@ -908,6 +945,7 @@ async function openNote(path, { focusTitle = false } = {}) {
   let md;
   try { md = await invoke('read_note', { path }); } catch (err) { toast(err); return; }
   current = path;
+  applyPageView();
   lastSaved = md;
   selectedDir = dirOf(path);
   store.set('last', path);
@@ -955,6 +993,7 @@ async function newFolder(dir = selectedDir) {
 
 // Keep the open note pointed at the right file after its folder or itself moves.
 function remap(from, to) {
+  remapPageViews(from, to);
   for (const [k, h] of [...histories]) {
     if (k === from || k.startsWith(from + '/')) { histories.delete(k); histories.set(to + k.slice(from.length), h); }
   }
@@ -1002,6 +1041,7 @@ async function openSketch(path) {
   current = null;
   lastSaved = null;
   $('#page').hidden = true;
+  applyPageView();
   document.body.classList.add('sketching');
   sketchEl.hidden = false;
   sketchPath = path;

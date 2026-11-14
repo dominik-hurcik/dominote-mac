@@ -49,6 +49,7 @@ Most note apps ship a full browser engine, sync servers and a database. Dominote
 - Present mode with ⇧⌘F: full screen without the sidebar, for a page or a sketch.
 - Export a page as PDF with ⇧⌘E, or right-click it and choose **Export as PDF**. The PDF is always in light colors.
 - Drag across blocks to select several, then copy them as Markdown, cut or delete.
+- A top-right View menu with full width and 100%, 90%, 80%, or 70% page zoom, remembered per note on this Mac.
 - Light and dark themes, and a choice of fonts for the menus, the page and code.
 - Autosave on every change, written atomically so a crash can't corrupt a note.
 - Undo and redo for every change on a page, including deleted blocks, table edits and changes made by an AI agent.
@@ -190,6 +191,7 @@ cd sketch && npm ci && npm run build
 ```sh
 cargo test
 node tests/md.test.js
+node tests/view.test.js
 ```
 
 ### Releases
